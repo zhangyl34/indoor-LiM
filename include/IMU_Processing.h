@@ -14,11 +14,6 @@
 
 #define IMU_MAX_INI_COUNT (10)
 
-
-
-
-
-
 // IMU forward propagation and backward undistortion
 class ImuProcess {
 public:

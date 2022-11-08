@@ -54,8 +54,8 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
         mean_gyr += (cur_gyr - mean_gyr) / init_iter_num;
         // 方差更新。https://blog.csdn.net/weixin_44479136/article/details/90510374 
         // cwiseProduct() 对应系数相乘
-        // cov_acc = cov_acc * (init_iter_num - 1.0) / init_iter_num + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) / (init_iter_num - 1.0);
-        // cov_gyr = cov_gyr * (init_iter_num - 1.0) / init_iter_num + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) / (init_iter_num - 1.0);
+        cov_acc = cov_acc * (init_iter_num - 1.0) / init_iter_num + (cur_acc - mean_acc).cwiseProduct(cur_acc - mean_acc) * (init_iter_num - 1.0) / (init_iter_num * init_iter_num);
+        cov_gyr = cov_gyr * (init_iter_num - 1.0) / init_iter_num + (cur_gyr - mean_gyr).cwiseProduct(cur_gyr - mean_gyr) * (init_iter_num - 1.0) / (init_iter_num * init_iter_num);
 
         init_iter_num ++;
     }
@@ -87,14 +87,13 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
     const double &imu_beg_time = v_imu.front()->header.stamp.toSec();  // 拿到当前帧头部的 IMU 的时间
     const double &imu_end_time = v_imu.back()->header.stamp.toSec();   // 拿到当前帧尾部的 IMU 的时间
     const double &pcl_beg_time = meas.lidar_beg_time;                  // pcl 开始的时间戳
+    const double &pcl_end_time = meas.lidar_end_time;                  // pcl 结束的时间戳
 
     // 把点云数据赋值给 pcl_out
     pcl_out = *(meas.lidar);
     // 根据点云中每个点的时间戳对点云进行重排序
     auto time_list = [](PointType &x, PointType &y) {return (x.curvature < y.curvature);};
     std::sort(pcl_out.points.begin(), pcl_out.points.end(), time_list);
-    // pcl 结束时间戳 = pcl 开始时间戳 + 最后一帧的 offset_time
-    const double &pcl_end_time = pcl_beg_time + pcl_out.points.back().curvature / double(1000);
     // 获取上一次 KF 估计的后验状态作为本次 IMU 预测的初始状态
     state_ikfom imu_state = kf_state.get_x();
     // pose6d 包含：LiDAR offset_time，上一帧加速度，上一帧角速度，上一帧速度，上一帧位置，上一帧旋转矩阵
@@ -117,11 +116,11 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
 
         // 离散中值积分
         angvel_avr << 0.5 * (head->angular_velocity.x + tail->angular_velocity.x),
-            0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
-            0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
+                      0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
+                      0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
         acc_avr << 0.5 * (head->linear_acceleration.x + tail->linear_acceleration.x),
-            0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
-            0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
+                   0.5 * (head->linear_acceleration.y + tail->linear_acceleration.y),
+                   0.5 * (head->linear_acceleration.z + tail->linear_acceleration.z);
 
         // 通过重力数值对加速度进行一下微调
         acc_avr = acc_avr * G_m_s2 / mean_acc.norm();
@@ -170,6 +169,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
     last_lidar_end_time_ = pcl_end_time;  // 保存雷达测量的结束时间
 
     /* 反向传播，去畸变*/
+    if (pcl_out.points.begin() == pcl_out.points.end()) {
+        return;
+    }
     auto it_pcl = pcl_out.points.end() - 1;
     for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--) {
         auto head = it_kp - 1;
@@ -186,7 +188,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
             M3D R_i(R_imu * Exp(angvel_avr, dt));                                        // 点云时刻的 IMU 姿态，即 W^R_I
             V3D P_i(it_pcl->x, it_pcl->y, it_pcl->z);                                    // 点云时刻的点云位置，即 L^P
             V3D T_ei(pos_imu + vel_imu * dt + 0.5 * acc_imu * dt * dt - imu_state.pos);  // 点云时刻的 IMU 位置 - 点云结束时刻的 IMU 位置
-            // conjugate() 取旋转矩阵的转置，（可能作者重新写了这个函数 eigen 官方库里这个函数好像没有转置这个操作，实际 cout 矩阵确实输出了转置）
+            // conjugate() 取旋转矩阵的转置
             // imu_state.offset_R_L_I 是惯性系下雷达坐标系的姿态，简单记为 I^R_L
             // 这里倒推一下去畸变补偿的公式
             // e 代表 end 时刻
@@ -208,8 +210,9 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
             it_pcl->y = P_compensate(1);
             it_pcl->z = P_compensate(2);
 
-            if (it_pcl == pcl_out.points.begin())
+            if (it_pcl == pcl_out.points.begin()) {
                 break;
+            }
         }
     }
 }
@@ -221,12 +224,11 @@ void ImuProcess::Process(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 1
     }
     ROS_ASSERT(meas.lidar != nullptr);
 
-    // 前 MAX_INI_COUNT 帧 LiDAR 数据，用于初始化
+    // 前 IMU_MAX_INI_COUNT 帧 LiDAR 数据，用于初始化加速度/角速度的均值
     if (imu_need_init_) {
-        // 前 MAX_INI_COUNT 帧 LiDAR 数据，用于计算加速度/角速度的均值
         IMU_init(meas, kf_state);
         last_imu_ = meas.imu.back();
-        // 需要更新 MAX_INI_COUNT 次
+        // 更新 MAX_INI_COUNT 次
         if (init_iter_num > IMU_MAX_INI_COUNT) {
             imu_need_init_ = false;
             cov_acc = cov_acc_scale;

@@ -9,8 +9,6 @@
 #include <lio/Pose6D.h>
 #include <sensor_msgs/Imu.h>
 
-
-
 #define G_m_s2 (9.81)  // 待统一，IMU_Pkrocessing.cpp 里用到。
 #define NUM_MATCH_POINTS (5)  // h_share_model 和拟合平面时使用。
 
@@ -35,7 +33,8 @@ typedef Eigen::Matrix3f M3F;
 #define MF(a,b)  Eigen::Matrix<float,a,b>
 #define VF(a)    Eigen::Matrix<float,a,1>
 
-#define SKEW_SYM_MATRX(v) (0.0,-v[2],v[1],v[2],0.0,-v[0],-v[1],v[0],0.0)
+// 打个括号就报错了。
+#define SKEW_SYM_MATRX(v) 0.0,-v[2],v[1],v[2],0.0,-v[0],-v[1],v[0],0.0
 
 // Lidar data and imu dates for the curent process
 struct MeasureGroup {
