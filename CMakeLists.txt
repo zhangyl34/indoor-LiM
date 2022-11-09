@@ -36,6 +36,8 @@ FIND_PACKAGE(PCL 1.8 REQUIRED)
 
 FIND_PATH(IKD_INCLUDE_DIR NAMES ikd_Tree.h PATHS /home/neal/usr/include/ikd_Tree)
 FIND_LIBRARY(IKD_LIBRARIES ikd_Tree HINTS /home/neal/usr/lib)
+FIND_PATH(LOGGER_INCLUDE_DIR NAMES file_logger.h PATHS /home/neal/usr/include/file_logger)
+FIND_LIBRARY(LOGGER_LIBRARIES file_logger HINTS /home/neal/usr/lib)
 
 ADD_MESSAGE_FILES(
   FILES
@@ -59,8 +61,9 @@ INCLUDE_DIRECTORIES(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${IKD_INCLUDE_DIR}
+  ${LOGGER_INCLUDE_DIR}
 )
 
 ADD_EXECUTABLE(lio_node src/laserMapping.cpp src/preprocess.cpp src/IMU_Processing.cpp src/use-ikfom.cpp src/common_lib.cpp)# include/ikd-Tree/ikd_Tree.cpp)
 
-TARGET_LINK_LIBRARIES(lio_node ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${IKD_LIBRARIES})
+TARGET_LINK_LIBRARIES(lio_node ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${IKD_LIBRARIES} ${LOGGER_LIBRARIES})

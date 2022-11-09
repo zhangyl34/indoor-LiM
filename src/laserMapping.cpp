@@ -15,6 +15,7 @@
 #include <tf/transform_broadcaster.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <ikd_Tree.h>
+#include <file_logger.h>
 
 #include "common_lib.h"
 #include "IMU_Processing.h"
@@ -29,10 +30,10 @@
 std::shared_ptr<Preprocess> p_pre(new Preprocess());  // 定义指向激光雷达数据的预处理类 Preprocess 的指针
 std::mutex mtx_buffer;                                // 互斥锁
 std::condition_variable sig_buffer;                   // 信号容器
-double last_timestamp_lidar = 0.0;                    // 上一帧 LiDAR 数据的时间戳
-double  last_timestamp_imu = -1.0;                    // 上一帧 IMU 数据的时间戳
+double last_timestamp_lidar = 0.0;                    // 上一帧 LiDAR 数据的起始时间戳
+double  last_timestamp_imu = 0.0;                     // 上一帧 IMU 数据的时间戳
 double lidar_end_time = 0.0;                          // 雷达结束时间
-std::deque<double> time_buffer;                       // LiDAR 数据时间戳缓存队列
+std::deque<double> time_buffer;                       // LiDAR 数据起始时间戳缓存队列
 std::deque<PointCloudXYZI::Ptr> lidar_buffer;         // 记录间隔采样后的 LiDAR 数据
 std::deque<sensor_msgs::Imu::ConstPtr> imu_buffer;    // IMU 数据缓存队列
 
@@ -157,16 +158,24 @@ void lasermap_fov_segment(const V3D& pos_LiD, const double &cube_len,
 接收 Livox 的点云数据，对点云数据进行预处理，并将处理后的数据保存到激光雷达数据队列中*/
 void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
 
-    mtx_buffer.lock();
+    std::unique_lock<std::mutex> locker(mtx_buffer, std::defer_lock);
+
+    locker.lock();
     // 如果当前帧 LiDAR 数据的时间戳比上一帧 LiDAR 数据的时间戳早，需要将激光雷达数据缓存队列清空
     if (msg->header.stamp.toSec() < last_timestamp_lidar) {
-        ROS_ERROR("lidar loop back, clear buffer");
+        std::string strout = "lidar loop back, clear buffer";
+        neal::logger(neal::LOG_ERROR, strout);
         lidar_buffer.clear();
     }
     last_timestamp_lidar = msg->header.stamp.toSec();
+    neal::logger(neal::LOG_INFO, "receive pcl data, timestamp: " + std::to_string(last_timestamp_lidar));
+
     // 如果不需要进行时间同步，而 IMU 时间戳和雷达时间戳相差大于 10s，则输出错误信息
     if (fabs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty()) {
-        printf("IMU and LiDAR not Synced, IMU time: %lf, lidar scan end time: %lf \n", last_timestamp_imu, last_timestamp_lidar);
+        std::string strout;
+        strout = "IMU and LiDAR not Synced, IMU time: " + std::to_string(last_timestamp_imu) +
+            ", lidar scan end time: " + std::to_string(last_timestamp_lidar) + '.';
+        neal::logger(neal::LOG_ERROR, strout);
     }
 
     // 用 pcl 点云格式保存接收到的激光雷达数据
@@ -175,7 +184,7 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
     p_pre->process(msg, ptr);
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(last_timestamp_lidar);
-    mtx_buffer.unlock();
+    locker.unlock();
     sig_buffer.notify_all();  // 唤醒阻塞的线程
 }
 
@@ -183,19 +192,23 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
 接收 IMU 数据，将 IMU 数据保存到 IMU 数据缓存队列中*/
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) {
 
+    std::unique_lock<std::mutex> locker(mtx_buffer, std::defer_lock);
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
-    double timestamp = msg->header.stamp.toSec();  // IMU 时间戳
-    mtx_buffer.lock();
+    double timestamp = msg->header.stamp.toSec();  // IMU 起始时间戳
+    locker.lock();
     // 如果当前 IMU 的时间戳小于上一个时刻 IMU 的时间戳，则 IMU 数据有误，将 IMU 数据缓存队列清空
     if (timestamp < last_timestamp_imu) {
-        ROS_WARN("imu loop back, clear buffer");
+        std::string strout = "imu loop back, clear buffer";
+        neal::logger(neal::LOG_ERROR, strout);
         imu_buffer.clear();
     }
-    // 将当前的 IMU 数据保存到 IMU 数据缓存队列中
     last_timestamp_imu = timestamp;
+    neal::logger(neal::LOG_INFO, "receive imu data, timestamp: " + std::to_string(last_timestamp_imu));
+
+    // 将当前的 IMU 数据保存到 IMU 数据缓存队列中
     imu_buffer.push_back(msg);
-    mtx_buffer.unlock();
+    locker.unlock();
     sig_buffer.notify_all();  // 唤醒阻塞的线程
 }
 
@@ -343,30 +356,30 @@ void publish_frame_world(const ros::Publisher& pubLaserCloudFull, const bool sca
 }
 
 // 把去畸变的雷达系下的点云转到 IMU 系
-void publish_frame_body(const ros::Publisher &pubLaserCloudFull_body, const PointCloudXYZI::Ptr& feats_undistort, const state_ikfom& sp) {
+// void publish_frame_body(const ros::Publisher &pubLaserCloudFull_body, const PointCloudXYZI::Ptr& feats_undistort, const state_ikfom& sp) {
 
-    int size = feats_undistort->points.size();
-    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));  // 转换到 IMU 系的点云
-    for (int i = 0; i < size; i++) {
-        pointBodyLidarToIMU(&feats_undistort->points[i], &laserCloudIMUBody->points[i], sp);
-    }
+//     int size = feats_undistort->points.size();
+//     PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));  // 转换到 IMU 系的点云
+//     for (int i = 0; i < size; i++) {
+//         pointBodyLidarToIMU(&feats_undistort->points[i], &laserCloudIMUBody->points[i], sp);
+//     }
 
-    sensor_msgs::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-    laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.frame_id = "body";
-    pubLaserCloudFull_body.publish(laserCloudmsg);
-}
+//     sensor_msgs::PointCloud2 laserCloudmsg;
+//     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+//     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+//     laserCloudmsg.header.frame_id = "body";
+//     pubLaserCloudFull_body.publish(laserCloudmsg);
+// }
 
 // 发布雷达信息
-void publish_frame_lidar(const ros::Publisher &pubLaserCloudFull_lidar, const PointCloudXYZI::Ptr& feats_undistort) {
+// void publish_frame_lidar(const ros::Publisher &pubLaserCloudFull_lidar, const PointCloudXYZI::Ptr& feats_undistort) {
 
-    sensor_msgs::PointCloud2 laserCloudmsg;
-    pcl::toROSMsg(*feats_undistort, laserCloudmsg);
-    laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.frame_id = "lidar";
-    pubLaserCloudFull_lidar.publish(laserCloudmsg);
-}
+//     sensor_msgs::PointCloud2 laserCloudmsg;
+//     pcl::toROSMsg(*feats_undistort, laserCloudmsg);
+//     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+//     laserCloudmsg.header.frame_id = "lidar";
+//     pubLaserCloudFull_lidar.publish(laserCloudmsg);
+// }
 
 // 在 publish_odometry 和 publish_path 中调用
 template <typename T>
@@ -544,9 +557,11 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
 
 int main(int argc, char **argv) {
 
-    ROS_INFO("version 21_21");
+    neal::logger(neal::LOG_INFO, "Test start.");
 
     /* 变量申明与定义*/
+    // Debug
+    int spin_num = 0;
     // VoxelGrid 降采样时的体素大小，地图的最小尺寸
     double filter_size_surf_min = 0.5, filter_size_map_min = 0.5;
     // I^T_L 和 I^R_L
@@ -570,7 +585,6 @@ int main(int argc, char **argv) {
     p_pre->set_blind(4);
     p_pre->set_N_SCANS(6);
     p_pre->set_point_filter_num(3);
-    // p_pre->TEST();
 
     // 初始化 ROS 节点，节点名为 laserMapping
     ros::init(argc, argv, "laserMapping");
@@ -610,9 +624,9 @@ int main(int argc, char **argv) {
     // 发布当前正在扫描的点云，topic 名字为 cloud_registered
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100000);
     // 发布经过运动畸变校正到 IMU 坐标系的点云，topic 名字为 cloud_registered_body
-    ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_body", 100000);
+    // ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_body", 100000);
     // 发布雷达的点云，topic 名字为 cloud_registered_lidar
-    ros::Publisher pubLaserCloudFull_lidar = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_lidar", 100000);
+    // ros::Publisher pubLaserCloudFull_lidar = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_lidar", 100000);
     // 发布当前里程计信息，topic 名字为 Odometry
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/Odometry", 100000);
     // 发布里程计总的路径，topic 名字为 path
@@ -645,6 +659,8 @@ int main(int argc, char **argv) {
             break;
         }
         // 订阅器的回调函数处理一次
+        spin_num ++;
+        neal::logger(neal::LOG_INFO, "spin once. spin times: " + std::to_string(spin_num));
         ros::spinOnce();
         // 将第一帧 LiDAR 数据，和这段时间内的 IMU 数据从缓存队列中取出，并保存到 meas 中
         if (sync_packages(Measures)) {
@@ -726,10 +742,11 @@ int main(int argc, char **argv) {
                 publish_frame_world(pubLaserCloudFull, scan_pub_en, dense_pub_en, pcd_save_en,
                     feats_undistort, state_point, pcl_wait_save);
             }
-            if (scan_pub_en && scan_body_pub_en) {
-                publish_frame_body(pubLaserCloudFull_body, feats_undistort, state_point);
-                publish_frame_lidar(pubLaserCloudFull_lidar, feats_undistort);
-            }
+            // if (scan_pub_en && scan_body_pub_en) {
+            //     publish_frame_body(pubLaserCloudFull_body, feats_undistort, state_point);
+            //     publish_frame_lidar(pubLaserCloudFull_lidar, feats_undistort);
+            // }
+
         }
 
         status = ros::ok();
