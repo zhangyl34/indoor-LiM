@@ -31,8 +31,7 @@ std::shared_ptr<Preprocess> p_pre(new Preprocess());  // 定义指向激光雷�
 std::mutex mtx_buffer;                                // 互斥锁
 std::condition_variable sig_buffer;                   // 信号容器
 double last_timestamp_lidar = 0.0;                    // 上一帧 LiDAR 数据的起始时间戳
-double  last_timestamp_imu = 0.0;                     // 上一帧 IMU 数据的时间戳
-double lidar_end_time = 0.0;                          // 雷达结束时间
+double last_timestamp_imu = 0.0;                      // 上一帧 IMU 数据的时间戳
 std::deque<double> time_buffer;                       // LiDAR 数据起始时间戳缓存队列
 std::deque<PointCloudXYZI::Ptr> lidar_buffer;         // 记录间隔采样后的 LiDAR 数据
 std::deque<sensor_msgs::Imu::ConstPtr> imu_buffer;    // IMU 数据缓存队列
@@ -163,12 +162,11 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg) {
     locker.lock();
     // 如果当前帧 LiDAR 数据的时间戳比上一帧 LiDAR 数据的时间戳早，需要将激光雷达数据缓存队列清空
     if (msg->header.stamp.toSec() < last_timestamp_lidar) {
-        std::string strout = "lidar loop back, clear buffer";
-        neal::logger(neal::LOG_ERROR, strout);
+        neal::logger(neal::LOG_ERROR, "lidar loop back, clear buffer");
         lidar_buffer.clear();
     }
     last_timestamp_lidar = msg->header.stamp.toSec();
-    neal::logger(neal::LOG_INFO, "receive pcl data, timestamp: " + std::to_string(last_timestamp_lidar));
+    //neal::logger(neal::LOG_INFO, "receive pcl data, timestamp: " + std::to_string(last_timestamp_lidar));
 
     // 如果不需要进行时间同步，而 IMU 时间戳和雷达时间戳相差大于 10s，则输出错误信息
     if (fabs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty()) {
@@ -204,7 +202,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in) {
         imu_buffer.clear();
     }
     last_timestamp_imu = timestamp;
-    neal::logger(neal::LOG_INFO, "receive imu data, timestamp: " + std::to_string(last_timestamp_imu));
+    //neal::logger(neal::LOG_INFO, "receive imu data, timestamp: " + std::to_string(last_timestamp_imu));
 
     // 将当前的 IMU 数据保存到 IMU 数据缓存队列中
     imu_buffer.push_back(msg);
@@ -218,7 +216,7 @@ bool sync_packages(MeasureGroup &meas) {
     static int scan_num = 0;
     static double lidar_mean_scantime = 0.0;
     static bool lidar_pushed = false;  // LiDAR 数据是否已经存入 meas 中
-    
+
     // 如果缓存队列中没有数据，则返回 false
     if (lidar_buffer.empty() || imu_buffer.empty()) {
         return false;
@@ -228,49 +226,54 @@ bool sync_packages(MeasureGroup &meas) {
     if (!lidar_pushed) {
         // 从 LiDAR 点云缓存队列中取出点云数据，放到 meas 中
         meas.lidar = lidar_buffer.front();
+        lidar_buffer.pop_front();  // 将 LiDAR 数据弹出
         // 当前帧 LiDAR 数据起始的时间戳
         meas.lidar_beg_time = time_buffer.front();
+        time_buffer.pop_front();   // 将时间戳弹出
+        double duration = meas.lidar->points.back().curvature / 1000.0;
         // 如果该数据没有点云
         if (meas.lidar->points.size() <= 1) {
-            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
-            ROS_WARN("Too few input point cloud!\n");
+            meas.lidar_end_time = meas.lidar_beg_time + 0.0;
+            neal::logger(neal::LOG_WARN, "Too few input point cloud!");
         }
         // 如果扫描用时不正常
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime) {
-            lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
+        else if (duration < 0.5 * lidar_mean_scantime) {
+            meas.lidar_end_time = meas.lidar_beg_time + duration;
+            neal::logger(neal::LOG_WARN, "Too short scan time!");
         }
         // 正常情况
         else {
             scan_num ++;
-            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            meas.lidar_end_time = meas.lidar_beg_time + duration;
+            lidar_mean_scantime += (duration - lidar_mean_scantime) / scan_num;
+            //neal::logger(neal::LOG_INFO, "lidar mean scan time: " + std::to_string(lidar_mean_scantime));
         }
-        // 当前帧 LiDAR 数据结束的时刻
-        meas.lidar_end_time = lidar_end_time;
         // 代表 LiDAR 数据已经被放到 meas 中了
         lidar_pushed = true;
     }
 
     // 如果 IMU 数据还没有收全
-    if (last_timestamp_imu < lidar_end_time) {
+    if (last_timestamp_imu < meas.lidar_end_time) {
         return false;
     }
 
     /* 拿出 lidar_beg_time 到 lidar_end_time 之间的所有 IMU 数据*/
-    double imu_time = imu_buffer.front()->header.stamp.toSec();
     meas.imu.clear();
-    while ((!imu_buffer.empty()) && (imu_time < lidar_end_time)) {
+    while ((!imu_buffer.empty())) {
         double imu_time = imu_buffer.front()->header.stamp.toSec();
-        if (imu_time > lidar_end_time) {
+        if (imu_time > meas.lidar_end_time) {
             break;
         }
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
     }
-
-    lidar_buffer.pop_front();  // 将 LiDAR 数据弹出
-    time_buffer.pop_front();   // 将时间戳弹出
-    lidar_pushed = false;      // 等待放入新的 LiDAR 数据
+    lidar_pushed = false;  // 等待放入新的 LiDAR 数据
+    std::string strout;
+    strout = "receive a message. lidar begin time: " +  std::to_string(meas.lidar_beg_time) +
+        "; lidar end time: " + std::to_string(meas.lidar_end_time) +
+        "; imu begin time: " + std::to_string(meas.imu.front()->header.stamp.toSec()) + 
+        "; imu end time: " + std::to_string(meas.imu.back()->header.stamp.toSec());
+    neal::logger(neal::LOG_INFO, strout);
     return true;
 }
 
@@ -322,7 +325,8 @@ void map_incremental(const bool flg_EKF_inited, const double filter_size_map_min
 }
 
 void publish_frame_world(const ros::Publisher& pubLaserCloudFull, const bool scan_pub_en, const bool dense_pub_en,
-    const bool pcd_save_en, const PointCloudXYZI::Ptr& feats_undistort, const state_ikfom& sp, PointCloudXYZI::Ptr& pcl_wait_save) {
+    const bool pcd_save_en, const PointCloudXYZI::Ptr& feats_undistort, const state_ikfom& sp,
+    PointCloudXYZI::Ptr& pcl_wait_save, const double& let) {
     
     if (scan_pub_en) {
         // 判断是否发布稠密数据
@@ -337,7 +341,7 @@ void publish_frame_world(const ros::Publisher& pubLaserCloudFull, const bool sca
 
         sensor_msgs::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
-        laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+        laserCloudmsg.header.stamp = ros::Time().fromSec(let);
         laserCloudmsg.header.frame_id = "camera_init";
         pubLaserCloudFull.publish(laserCloudmsg);
     }
@@ -355,32 +359,6 @@ void publish_frame_world(const ros::Publisher& pubLaserCloudFull, const bool sca
     }
 }
 
-// 把去畸变的雷达系下的点云转到 IMU 系
-// void publish_frame_body(const ros::Publisher &pubLaserCloudFull_body, const PointCloudXYZI::Ptr& feats_undistort, const state_ikfom& sp) {
-
-//     int size = feats_undistort->points.size();
-//     PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));  // 转换到 IMU 系的点云
-//     for (int i = 0; i < size; i++) {
-//         pointBodyLidarToIMU(&feats_undistort->points[i], &laserCloudIMUBody->points[i], sp);
-//     }
-
-//     sensor_msgs::PointCloud2 laserCloudmsg;
-//     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
-//     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-//     laserCloudmsg.header.frame_id = "body";
-//     pubLaserCloudFull_body.publish(laserCloudmsg);
-// }
-
-// 发布雷达信息
-// void publish_frame_lidar(const ros::Publisher &pubLaserCloudFull_lidar, const PointCloudXYZI::Ptr& feats_undistort) {
-
-//     sensor_msgs::PointCloud2 laserCloudmsg;
-//     pcl::toROSMsg(*feats_undistort, laserCloudmsg);
-//     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-//     laserCloudmsg.header.frame_id = "lidar";
-//     pubLaserCloudFull_lidar.publish(laserCloudmsg);
-// }
-
 // 在 publish_odometry 和 publish_path 中调用
 template <typename T>
 void set_posestamp(T &out, const state_ikfom& sp, const geometry_msgs::Quaternion& gq) {
@@ -396,13 +374,13 @@ void set_posestamp(T &out, const state_ikfom& sp, const geometry_msgs::Quaternio
 
 // 发布里程计
 void publish_odometry(const ros::Publisher &pubOdomAftMapped, const state_ikfom& sp,
-    const geometry_msgs::Quaternion& gq, const Eigen::Matrix<double, 23, 23>& P) {
+    const geometry_msgs::Quaternion& gq, const Eigen::Matrix<double, 23, 23>& P, const double& let) {
 
     nav_msgs::Odometry odomAftMapped;  // 只包含了一个位姿
 
     odomAftMapped.header.frame_id = "camera_init";
     odomAftMapped.child_frame_id = "body";
-    odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time);
+    odomAftMapped.header.stamp = ros::Time().fromSec(let);
     set_posestamp(odomAftMapped.pose, sp, gq);
     pubOdomAftMapped.publish(odomAftMapped);
 
@@ -433,12 +411,12 @@ void publish_odometry(const ros::Publisher &pubOdomAftMapped, const state_ikfom&
 
 // 每隔 10 个发布一下位姿
 void publish_path(const ros::Publisher pubPath, const state_ikfom& sp,
-    const geometry_msgs::Quaternion& gq, nav_msgs::Path& path) {
+    const geometry_msgs::Quaternion& gq, nav_msgs::Path& path, const double& let) {
 
     geometry_msgs::PoseStamped msg_body_pose;  // 位姿
 
     set_posestamp(msg_body_pose, sp, gq);
-    msg_body_pose.header.stamp = ros::Time().fromSec(lidar_end_time);
+    msg_body_pose.header.stamp = ros::Time().fromSec(let);
     msg_body_pose.header.frame_id = "camera_init";
 
     /* if path is too large, the rvis will crash.*/
@@ -561,7 +539,7 @@ int main(int argc, char **argv) {
 
     /* 变量申明与定义*/
     // Debug
-    int spin_num = 0;
+    //int spin_num = 0;
     // VoxelGrid 降采样时的体素大小，地图的最小尺寸
     double filter_size_surf_min = 0.5, filter_size_map_min = 0.5;
     // I^T_L 和 I^R_L
@@ -618,15 +596,11 @@ int main(int argc, char **argv) {
 
     /* ROS 订阅器和发布器的定义和初始化*/
     // 雷达点云的订阅器 sub_pcl，订阅点云的 topic
-    ros::Subscriber sub_pcl = nh.subscribe(lid_topic, 200000, livox_pcl_cbk);
+    ros::Subscriber sub_pcl = nh.subscribe(lid_topic, 200000, livox_pcl_cbk);  // 100ms 一帧
     // IMU 的订阅器 sub_imu，订阅 IMU 的 topic
-    ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+    ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);  // 5ms 一帧
     // 发布当前正在扫描的点云，topic 名字为 cloud_registered
     ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100000);
-    // 发布经过运动畸变校正到 IMU 坐标系的点云，topic 名字为 cloud_registered_body
-    // ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_body", 100000);
-    // 发布雷达的点云，topic 名字为 cloud_registered_lidar
-    // ros::Publisher pubLaserCloudFull_lidar = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_lidar", 100000);
     // 发布当前里程计信息，topic 名字为 Odometry
     ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/Odometry", 100000);
     // 发布里程计总的路径，topic 名字为 path
@@ -639,7 +613,8 @@ int main(int argc, char **argv) {
     /* 主循环变量申明*/
     ros::Rate rate(5000);  // 设置主循环每次运行的时间至少为 0.0002 秒（5000Hz）
     bool status = ros::ok();
-    bool flg_first_scan = true;  // LiDAR 是否初次扫描
+    // LiDAR 初次扫描时间
+    bool flg_first_scan = true;
     double first_lidar_time = 0.0;
     // sync_packages 中使用的变量
     MeasureGroup Measures;
@@ -659,94 +634,94 @@ int main(int argc, char **argv) {
             break;
         }
         // 订阅器的回调函数处理一次
-        spin_num ++;
-        neal::logger(neal::LOG_INFO, "spin once. spin times: " + std::to_string(spin_num));
+        // spin_num ++;
+        // neal::logger(neal::LOG_INFO, "spin once. spin times: " + std::to_string(spin_num));
         ros::spinOnce();
         // 将第一帧 LiDAR 数据，和这段时间内的 IMU 数据从缓存队列中取出，并保存到 meas 中
-        if (sync_packages(Measures)) {
-            // 第一次 while 循环，进行初始化
-            if (flg_first_scan) {
-                first_lidar_time = Measures.lidar_beg_time;
-                flg_first_scan = false;
-                continue;
-            }
-            ROS_INFO("number of run times: %d \n", dbg_run_times++);
-            // 对 IMU 数据进行预处理，包含了前向传播和反向传播
-            p_imu->Process(Measures, kf, feats_undistort);
-            // 获取 kf 预测的全局状态
-            state_point = kf.get_x();
-            // 世界系下雷达坐标系的位置，W^p_L = W^p_I + W^R_I * I^t_L
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
-            // 如果点云数据为空，代表激光雷达没有完成去畸变，此时还不能初始化成功
-            if (feats_undistort->empty() || (feats_undistort == NULL)) {
-                ROS_WARN("No point, skip this scan!(1)\n");
-                continue;
-            }
+        if (!sync_packages(Measures)) {
+            status = ros::ok();
+            rate.sleep();
+            continue;
+        }
+        // 第一次 while 循环，进行初始化
+        if (flg_first_scan) {
+            first_lidar_time = Measures.lidar_beg_time;
+            flg_first_scan = false;
+            continue;
+        }
+        ROS_INFO("number of run times: %d \n", dbg_run_times++);
+        // 对 IMU 数据进行预处理，包含了前向传播和反向传播
+        (*feats_undistort).clear();
+        p_imu->Process(Measures, kf, feats_undistort);
+        // 如果点云数据为空，代表激光雷达没有完成去畸变，此时还不能初始化成功
+        if (feats_undistort->empty() || (feats_undistort == NULL)) {
+            ROS_WARN("No point, skip this scan!(1)\n");
+            continue;
+        }
+        // 获取 kf 预测的全局状态
+        state_point = kf.get_x();
+        // 世界系下雷达坐标系的位置，W^p_L = W^p_I + W^R_I * I^t_L
+        pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
-            // 动态调整局部地图
-            lasermap_fov_segment(pos_lid, cube_len, DET_RANGE, LocalMap_Points);
+        // 动态调整局部地图
+        lasermap_fov_segment(pos_lid, cube_len, DET_RANGE, LocalMap_Points);
 
-            // 对一次 scan 内的特征点云降采样
-            downSizeFilterSurf.setInputCloud(feats_undistort);     // 输入去畸变后的点云数据
-            downSizeFilterSurf.filter(*feats_down_body);           // 输出降采样后的点云数据
-            feats_down_size = feats_down_body->points.size();      // 降采样后的点云数量
-            
-            // 构建 ikd-Tree
-            if (ikdtree.Root_Node == nullptr) {
-                if (feats_down_size > 5) {
-                    // 设置 ikd-Tree 的降采样参数
-                    ikdtree.set_downsample_param(filter_size_map_min);
-                    // 世界坐标系下，降采样的点云数据
-                    feats_down_world->resize(feats_down_size);
-                    for (int i = 0; i < feats_down_size; i++) {
-                        // 将降采样得到的点云数据，转换到世界坐标系下
-                        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]), state_point);
-                    }
-                    // 构建 ikd-Tree
-                    ikdtree.Build(feats_down_world->points);
-                    ROS_INFO("ikd-Tree initialized!");
+        // 对一次 scan 内的特征点云降采样
+        downSizeFilterSurf.setInputCloud(feats_undistort);     // 输入去畸变后的点云数据
+        downSizeFilterSurf.filter(*feats_down_body);           // 输出降采样后的点云数据
+        feats_down_size = feats_down_body->points.size();      // 降采样后的点云数量
+        
+        // 构建 ikd-Tree
+        if (ikdtree.Root_Node == nullptr) {
+            if (feats_down_size > 5) {
+                // 设置 ikd-Tree 的降采样参数
+                ikdtree.set_downsample_param(filter_size_map_min);
+                // 世界坐标系下，降采样的点云数据
+                feats_down_world->resize(feats_down_size);
+                for (int i = 0; i < feats_down_size; i++) {
+                    // 将降采样得到的点云数据，转换到世界坐标系下
+                    pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]), state_point);
                 }
-                continue;
+                // 构建 ikd-Tree
+                ikdtree.Build(feats_down_world->points);
+                ROS_INFO("ikd-Tree initialized!");
             }
-            
-            if (feats_down_size < 5) {
-                ROS_WARN("No point, skip this scan!(2)\n");
-                continue;
-            }
+            continue;
+        }
+        
+        if (feats_down_size < 5) {
+            ROS_WARN("No point, skip this scan!(2)\n");
+            continue;
+        }
 
-            feats_down_world->resize(feats_down_size);
-            Nearest_Points.resize(feats_down_size);
+        /* 待讨论。。。*/
+        feats_down_world->resize(feats_down_size);
+        Nearest_Points.resize(feats_down_size);
 
-            /* 迭代卡尔曼滤波更新地图信息*/
-            double solve_H_time = 0;
-            /* ikfom 第九步，更新*/
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
-            state_point = kf.get_x();
-            pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+        /* 迭代卡尔曼滤波更新地图信息*/
+        double solve_H_time = 0;
+        /* ikfom 第九步，更新*/
+        kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+        state_point = kf.get_x();
+        pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
 
-            /* 发布里程计*/
-            geometry_msgs::Quaternion geoQuat;  // 四元数
-            geoQuat.x = state_point.rot.coeffs()[0];
-            geoQuat.y = state_point.rot.coeffs()[1];
-            geoQuat.z = state_point.rot.coeffs()[2];
-            geoQuat.w = state_point.rot.coeffs()[3];
-            publish_odometry(pubOdomAftMapped, state_point, geoQuat, kf.get_P());
+        /* 发布里程计*/
+        geometry_msgs::Quaternion geoQuat;  // 四元数
+        geoQuat.x = state_point.rot.coeffs()[0];
+        geoQuat.y = state_point.rot.coeffs()[1];
+        geoQuat.z = state_point.rot.coeffs()[2];
+        geoQuat.w = state_point.rot.coeffs()[3];
+        publish_odometry(pubOdomAftMapped, state_point, geoQuat, kf.get_P(), Measures.lidar_end_time);
 
-            /* 向 ikd-Tree 添加特征点*/
-            bool flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? false : true;
-            map_incremental(flg_EKF_inited, filter_size_map_min, state_point);
+        /* 向 ikd-Tree 添加特征点*/
+        bool flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? false : true;
+        map_incremental(flg_EKF_inited, filter_size_map_min, state_point);
 
-            /* 发布轨迹和点*/
-            publish_path(pubPath, state_point, geoQuat, path);
-            if (scan_pub_en || pcd_save_en) {
-                publish_frame_world(pubLaserCloudFull, scan_pub_en, dense_pub_en, pcd_save_en,
-                    feats_undistort, state_point, pcl_wait_save);
-            }
-            // if (scan_pub_en && scan_body_pub_en) {
-            //     publish_frame_body(pubLaserCloudFull_body, feats_undistort, state_point);
-            //     publish_frame_lidar(pubLaserCloudFull_lidar, feats_undistort);
-            // }
-
+        /* 发布轨迹和点*/
+        publish_path(pubPath, state_point, geoQuat, path, Measures.lidar_end_time);
+        if (scan_pub_en || pcd_save_en) {
+            publish_frame_world(pubLaserCloudFull, scan_pub_en, dense_pub_en, pcd_save_en,
+                feats_undistort, state_point, pcl_wait_save, Measures.lidar_end_time);
         }
 
         status = ros::ok();

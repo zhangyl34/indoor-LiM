@@ -7,7 +7,7 @@ Preprocess::Preprocess()
 // 输入一帧 LiDAR 数据，输出处理后的点云数据
 void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, PointCloudXYZI::Ptr pl_surf) {
 
-    int plsize = msg->point_num;  // 一帧中的点云总个数
+    int plsize = msg->point_num;     // 一帧中的点云总个数
     (*pl_surf).clear();              // 清除之前的平面点云缓存
     (*pl_surf).reserve(plsize);      // 分配空间
 
