@@ -8,6 +8,7 @@
   - [关于 LiDAR](#关于-lidar)
   - [关于 KF](#关于-kf)
   - [关于四元数](#关于四元数)
+  - [关于哈希表](#关于哈希表)
 - [一些文章](#一些文章)
   - [LOAM: Lidar Odometry and Mapping in Real-time](#loam-lidar-odometry-and-mapping-in-real-time)
   - [FAST-LIO: A Fast, Robust LiDAR-Inertial Odometry Package by Tightly-Coupled Iterated Kalman Filter](#fast-lio-a-fast-robust-lidar-inertial-odometry-package-by-tightly-coupled-iterated-kalman-filter)
@@ -199,6 +200,17 @@ $$\mathbf{q}_t = \frac{\sin(1-t)\theta}{\sin \theta} \mathbf{q}_1 + \frac{\sin t
 where:
 $$\cos \theta =\frac{\mathbf{q}_1 \cdot \mathbf{q}_2}{|\mathbf{q}_1||\mathbf{q}_2|}=\frac{s_1 s_2 + \mathbf{v}_1 \cdot \mathbf{v}_2}{|\mathbf{q}_1||\mathbf{q}_2|}$$
 
+### 关于哈希表
+
+哈希表是一种根据关键字 __key__ 来访问值 __value__ 的数据结构。哈希表的插入和查找效率非常高，时间复杂度都是 O(1)。
+
+<img src="/img/hash_table.jpeg" width=70%>
+
+实际使用中，不同的 __key__ 小概率会计算出相同的 __index__，这就是哈希冲突，几乎所有的哈希函数都存在这个问题。链接中给出了几种常见的解决哈希冲突的方法。
+https://www.cnblogs.com/funtrin/p/16060350.html
+
+C++ 标准库中的 std::unordered_map 是一种典型的 <key, value> 类型容器，其内部正是封装了哈希表。
+
 ## 一些文章
 
 ```mermaid
@@ -345,6 +357,8 @@ __n 维流形：__ 局部同胚于 $\mathbb{R}^n$。
 
 ### Faster-LIO: Lightweight Tightly Coupled Lidar-Inertial Odometry Using Parallel Sparse Incremental Voxels
 
+https://zhuanlan.zhihu.com/p/541776806
+
 FASTER-LIO 作为 FAST-LIO2 的续作，通过一些处理将速率进一步提升，文中不使用复杂的基于树的结构来划分空间点云，而使用增量体素 iVox 作为点云空间数据结构，它是从传统体素修改而来的，支持增量插入和并行近似 k-NN 查询。
 
 ## FAST-LIO2 源码梳理
@@ -357,10 +371,7 @@ __ros::spinOnce()__
 
 ### 消息格式
 
-
-
 Livox ROS 驱动程序的时间戳同步功能是基于 Livox-SDK 的 LidarSetUtcSyncTime 接口实现，且只支持 GPS 同步。
-
 
 Livox customized data package format, as follows:
 
@@ -379,6 +390,8 @@ CustomPoint[] points  # Pointcloud data
 ----uint8 tag           # livox tag
 ----uint8 line          # laser number in lidar
 ```
+
+时间戳可由 ros::Time::now() 获取：从 1970.1.1 到此刻所经过的时间。
 
 ## 一些公司
 
