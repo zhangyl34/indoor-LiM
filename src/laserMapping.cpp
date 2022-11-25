@@ -525,32 +525,50 @@ int main(int argc, char **argv) {
     // Debug
     //int spin_num = 0;
     // 地图的最小分辨率
-    const double filter_size_map_min = 0.5;
+    double filter_size_map_min = 0.0;
     // I^T_L 和 I^R_L
-    const std::vector<double> extrinT = {0.04165,0.02326,-0.0284};
-    const std::vector<double> extrinR = {1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0};
+    std::vector<double> extrinT(3, 0.0);
+    std::vector<double> extrinR(9, 0.0);
     // IMU 的角速度协方差，加速度协方差，角速度偏置协方差，加速度偏置协方差
-    const double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+    double gyr_cov = 0.0, acc_cov = 0.0, b_gyr_cov = 0.0, b_acc_cov = 0.0;
     // KF 最大迭代次数
     const int NUM_MAX_ITERATIONS = 4;
     // LiDAR topic 和 IMU topic
-    const std::string lid_topic = "/livox/lidar";
-    const std::string imu_topic = "/livox/imu";
+    std::string lid_topic, imu_topic;
+
     // 发布当前正在扫描的点云数据，将点云地图保存到 PCD 文件
     const bool scan_pub_en = true, pcd_save_en = true;
     // 发布经过运动畸变校正注册到 IMU 坐标系的点云数据，需要两个变量同时为 true 才发布
     const bool dense_pub_en = true, scan_body_pub_en = true;
     // 立方体长度，当前雷达系中心到各个地图边缘的距离
-    const float CUBE_LEN = 1000.0;
-    const float DET_RANGE = 450.0;
+    float cube_len = 0.0;
+    float det_range = 0.0;
     // preprocess 参数
-    p_pre->set_blind(4);
-    p_pre->set_N_SCANS(6);
-    p_pre->set_point_filter_num(3);
+    double p_blind = 0.0;
+    int p_N_SCANS = 0;
 
     // 初始化 ROS 节点，节点名为 laserMapping
     ros::init(argc, argv, "laserMapping");
     ros::NodeHandle nh;
+
+    // 从文件读取参数
+    nh.param<double>("filter_size_map", filter_size_map_min, 0.5);
+    nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
+    nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    nh.param<std::string>("common/lid_topic", lid_topic, "/livox/lidar");
+    nh.param<std::string>("common/imu_topic", imu_topic, "/livox/imu");
+    nh.param<float>("cube_side_length", cube_len, 1000.0);
+    nh.param<float>("mapping/det_range", det_range, 450.0);
+    nh.param<double>("preprocess/blind", p_blind, 4.0);
+    nh.param<int>("preprocess/scan_line", p_N_SCANS, 6);
+    nh.param<double>("mapping/gyr_cov", gyr_cov, 0.1);
+    nh.param<double>("mapping/acc_cov", acc_cov, 0.1);
+    nh.param<double>("mapping/b_gyr_cov", b_gyr_cov, 0.0001);
+    nh.param<double>("mapping/b_acc_cov", b_acc_cov, 0.0001);
+
+    p_pre->set_blind(p_blind);
+    p_pre->set_N_SCANS(p_N_SCANS);
+    p_pre->set_point_filter_num(3);
 
     // 初始化输出路径
     nav_msgs::Path path;
@@ -640,7 +658,7 @@ int main(int argc, char **argv) {
         // 世界系下雷达坐标系的位置，W^p_L = W^p_I + W^R_I * I^t_L
         vect3 pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         // 动态调整局部地图
-        lasermap_fov_segment(pos_lid, CUBE_LEN, DET_RANGE);
+        lasermap_fov_segment(pos_lid, cube_len, det_range);
 
         // 对一次 scan 内的特征点云降采样
         downSizeFilterSurf.setInputCloud(feats_undistort);     // 输入去畸变后的点云数据
