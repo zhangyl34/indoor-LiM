@@ -2,6 +2,7 @@
 
 Preprocess::Preprocess()
     : blind(0.01), point_filter_num(1), N_SCANS(6) {
+    reflect_thresh = -1;
 }
 
 // 输入一帧 LiDAR 数据，输出处理后的点云数据
@@ -16,8 +17,8 @@ void Preprocess::process(const livox_ros_driver::CustomMsg::ConstPtr &msg, Point
     int valid_num = 0;  // 有效的点云数
     // 分别对每个点云进行处理
     for (int i = 0; i < plsize; i++) {
-        // 只取线数在 0-N_SCANS 内并且回波次序为 1 或者 0 的点云
-        if ((msg->points[i].line < N_SCANS) && 
+        // 只取线数在 0-N_SCANS 内并且距离大于 10cm 并且回波次序为 1 或者 0 的点云
+        if ((msg->points[i].line < N_SCANS) && (msg->points[i].x > 0.1) && (msg->points[i].reflectivity > reflect_thresh) &&
             ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00)) {
             
             if (valid_num % point_filter_num == 0) {
