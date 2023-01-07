@@ -5,9 +5,6 @@
 
 	<rosparam command="load" file="$(find lio)/config/mid70.yaml" />
 
-	<param name="filter_size_map" type="double" value="0.05" />
-	<param name="cube_side_length" type="double" value="100.0" />
-
 	<!-- pkg：使用的包，type：可执行文件的名称，name：节点名称，output：将信息输出到屏幕-->
 	<node pkg="lio" type="lio_node" name="laserMapping" output="screen" /> 
 

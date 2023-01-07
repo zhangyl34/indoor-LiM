@@ -15,6 +15,7 @@ ImuProcess::ImuProcess()
     angvel_last     = V3D(0.0 ,0.0 ,0.0);
     Lidar_T_wrt_IMU = V3D(0.0 ,0.0 ,0.0);
     Lidar_R_wrt_IMU = M3D::Identity();
+    R_W_G           = M3D::Identity();
     last_imu_.reset(new sensor_msgs::Imu());
 }
 
@@ -55,6 +56,17 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
         init_P(21, 21) = init_P(22, 22) = 0.00001;
         kf_state.change_P(init_P);  // 更新协方差矩阵 P_
 
+        // 计算 G^R_W，用于储存地图时，地图能够平行于 ground。
+        V3D z_ground = mean_acc;
+        z_ground = z_ground / z_ground.norm();
+        V3D x_ground = V3D(0.0,1.0,0.0).cross(z_ground);
+        x_ground = x_ground / x_ground.norm();
+        V3D y_ground = z_ground.cross(x_ground);
+        y_ground = y_ground / y_ground.norm();
+        R_W_G << x_ground(0), x_ground(1), x_ground(2),
+                 y_ground(0), y_ground(1), y_ground(2),
+                 z_ground(0), z_ground(1), z_ground(2);
+
         // 包末尾的 imu 数据
         last_imu_ = meas.imu.back();
         last_lidar_end_time_ = meas.lidar_end_time;
@@ -90,16 +102,17 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
     double dt = 0;   // 时间间隔
     input_ikfom in;  // 系统输入
 
-    // 判断是否存在 situation1。
+    // 判断是否存在 situation1
+    // 经检验确实存在 situation1
     {
         auto &imuSecond = *(v_imu.begin() + 1);
         if (imuSecond->header.stamp.toSec() < meas.lidar_beg_time) {
 
-            std::string strout;
-            strout = "situation 1 occur! v_imu time stamp: " + std::to_string((*v_imu.begin())->header.stamp.toSec())
-                + "; " + std::to_string((*(v_imu.begin()+1))->header.stamp.toSec()) +
-                + "; " + std::to_string((*(v_imu.begin()+2))->header.stamp.toSec());
-            neal::logger(neal::LOG_TEST, strout);
+            // std::string strout;
+            // strout = "situation 1 occur! v_imu time stamp: " + std::to_string((*v_imu.begin())->header.stamp.toSec())
+            //     + "; " + std::to_string((*(v_imu.begin()+1))->header.stamp.toSec()) +
+            //     + "; " + std::to_string((*(v_imu.begin()+2))->header.stamp.toSec());
+            // neal::logger(neal::LOG_TEST, strout);
             v_imu.pop_front();
         }
     }
@@ -120,10 +133,10 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas,
 
         // 如果 head 时刻早于这一包雷达开始时刻，第一次
         if (head->header.stamp.toSec() < meas.lidar_beg_time) {
-            std::string strout;
-            strout = "lastlidar end time: " + std::to_string(last_lidar_end_time_)
-                + "; lidar beg time: " + std::to_string(meas.lidar_beg_time);
-            neal::logger(neal::LOG_INFO, strout);
+            // std::string strout;
+            // strout = "lastlidar end time: " + std::to_string(last_lidar_end_time_)
+            //     + "; lidar beg time: " + std::to_string(meas.lidar_beg_time);
+            // neal::logger(neal::LOG_INFO, strout);
             // 从上次雷达结束时刻开始传播
             dt = tail->header.stamp.toSec() - last_lidar_end_time_;
         }

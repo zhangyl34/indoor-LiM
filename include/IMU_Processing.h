@@ -29,6 +29,10 @@ public:
     void set_gyr_bias_cov(const V3D &b_g) {cov_bias_gyr = b_g;};
     void set_acc_bias_cov(const V3D &b_a) {cov_bias_acc = b_a;};
 
+    /* 读取内参。*/
+    V3D get_mean_acc() const {return mean_acc;};
+    M3D get_R_W_G() const {return R_W_G;};
+
     void Process(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
 private:
@@ -53,6 +57,8 @@ private:
     V3D acc_s_last;                      // 上一帧加速度
     V3D angvel_last;                     // 上一帧角速度
     double last_lidar_end_time_;         // 上一包雷达结束时间戳
+
+    M3D R_W_G;  // 计算 G^R_W，用于储存地图时，地图能够平行于 ground
 };
 
 

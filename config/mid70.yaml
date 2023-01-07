@@ -3,17 +3,24 @@ common:
     imu_topic:  "/imu"
 
 preprocess:
-    scan_line: 1
-    blind: 0.05
+    scan_line:      1
+    blind:          0.05
+    reflect_thresh: 10
 
 mapping:
-    acc_cov: 0.5
-    gyr_cov: 0.5
+    acc_cov:   0.5
+    gyr_cov:   0.5
     b_acc_cov: 0.0005
     b_gyr_cov: 0.0005
-    det_range:     260.0
+    filter_size_map:  0.05  # ikd-Tree 的降采样参数
+    filter_size_surf: 0.5   # ikf 的降采样参数，太小会崩溃
     extrinsic_T: [ 0.0078, 0.13, 0.0509 ]
     extrinsic_R: [ 1.0, 0.0, 0.0,
                    0.0, 1.0, 0.0,
                    0.0, 0.0, 1.0]
-
+                   
+publish:
+    pcd_save_en: true
+    pub_path_en: false
+    pub_odometry_en: false
+    dense_publish_en: true
