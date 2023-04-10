@@ -31,8 +31,13 @@ FIND_PACKAGE(catkin REQUIRED COMPONENTS
 )
 
 FIND_PACKAGE(Eigen3 REQUIRED)
+FIND_PACKAGE(ZLIB REQUIRED)
 
-FIND_PACKAGE(PCL 1.8 REQUIRED)
+SET(PCL_DIR /usr/local/share/pcl-1.13)
+FIND_PACKAGE(PCL 1.13 REQUIRED)
+SET(PCL_INCLUDE_DIRS /usr/local/include/pcl-1.13)
+add_definitions(${PCL_DEFINITIONS})
+MESSAGE(STATUS "PCL version: "${PCL_VERSION})
 
 FIND_PATH(IKD_INCLUDE_DIR NAMES ikd_Tree.h PATHS /home/neal/usr/include/ikd_Tree)
 FIND_LIBRARY(IKD_LIBRARIES ikd_Tree HINTS /home/neal/usr/lib)
@@ -62,8 +67,9 @@ INCLUDE_DIRECTORIES(
   ${PCL_INCLUDE_DIRS}
   ${IKD_INCLUDE_DIR}
   ${LOGGER_INCLUDE_DIR}
+  ${ZLIB_INCLUDE_DIRS}
 )
 
-ADD_EXECUTABLE(lio_node src/laserMapping.cpp src/preprocess.cpp src/IMU_Processing.cpp src/use-ikfom.cpp src/common_lib.cpp)# include/ikd-Tree/ikd_Tree.cpp)
+ADD_EXECUTABLE(lio_node src/laserMapping.cpp src/preprocess.cpp src/IMU_Processing.cpp src/use-ikfom.cpp src/common_lib.cpp src/cnpy.cpp)# include/ikd-Tree/ikd_Tree.cpp)
 
-TARGET_LINK_LIBRARIES(lio_node ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${IKD_LIBRARIES} ${LOGGER_LIBRARIES})
+TARGET_LINK_LIBRARIES(lio_node ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${IKD_LIBRARIES} ${LOGGER_LIBRARIES} ${ZLIB_LIBRARIES})

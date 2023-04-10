@@ -9,6 +9,7 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/io/ply_io.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/impl/pcl_base.hpp>
 #include <ros/ros.h>
 #include <nav_msgs/Path.h>
 #include <nav_msgs/Odometry.h>
@@ -22,6 +23,7 @@
 #include "IMU_Processing.h"
 #include "preprocess.h"
 #include "use-ikfom.h"
+#include "cnpy.h"
 
 // #define _MOV_THRESHOLD   (1.5)  // 当前雷达系中心到各个地图边缘的权重
 #define _LASER_POINT_COV (0.001)
@@ -438,6 +440,30 @@ void publish_path(const ros::Publisher pubPath) {
     }
 }
 
+void saveNumpy(int id) {
+    /* LiDAR pose*/
+    // W^p_L = W^p_I + W^R_I * I^t_L
+    V3D pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+    // W^R_I * I^R_L
+    M3D rot_lid = state_point.rot.toRotationMatrix() * state_point.offset_R_L_I.toRotationMatrix();
+    double a[16] = {rot_lid(0,0),rot_lid(0,1),rot_lid(0,2),pos_lid(0),
+        rot_lid(1,0),rot_lid(1,1),rot_lid(1,2),pos_lid(1),
+        rot_lid(2,0),rot_lid(2,1),rot_lid(2,2),pos_lid(2),
+        0.0, 0.0, 0.0, 1.0};
+    std::vector<double> savePose(a, a+16);
+    cnpy::npy_save(string(ROOT_DIR) + "npOut/pose_" + std::to_string(id) + ".npy",&savePose[0],{4,4},"w");
+
+    /* point clouds*/
+    int size = feats_undistort->points.size();
+    std::vector<double> savePoint(size * 3);
+    for (int i = 0; i < size; i++) {
+        savePoint[3*i + 0] = feats_undistort->points[i].x;
+        savePoint[3*i + 1] = feats_undistort->points[i].y;
+        savePoint[3*i + 2] = feats_undistort->points[i].z;
+    }
+    cnpy::npy_save(string(ROOT_DIR) + "npOut/points_" + std::to_string(id) + ".npy",&savePoint[0],{size,3},"w");
+}
+
 // 对应 fast-lio2 公式 12 和 13。fast-lio 公式 14。
 void h_share_model(state_ikfom &st, esekfom::dyn_share_datastruct<double> &ekfom_data) {
 
@@ -560,6 +586,8 @@ int main(int argc, char** argv) {
     int num_max_iterations = 4;
     // LiDAR topic 和 IMU topic
     std::string lid_topic, imu_topic;
+    // 保存文件
+    bool save_npy_en;
 
     // preprocess 参数
     double param_blind;
@@ -596,6 +624,7 @@ int main(int argc, char** argv) {
     
     /* test*/
     nh.param<int>("preprocess/reflect_thresh", param_reflect, 10);
+    nh.param<bool>("publish/save_npy_en", save_npy_en, true);
 
     p_pre->set_blind(param_blind);
     p_pre->set_N_SCANS(param_scans);
@@ -604,7 +633,7 @@ int main(int argc, char** argv) {
     
     // 初始化输出路径
     path.header.stamp = ros::Time::now();
-    path.header.frame_id ="camera_init";
+    path.header.frame_id = "camera_init";
     // VoxelGrid 用来执行降采样操作，PointType = pcl::PointXYZINormal
     pcl::VoxelGrid<PointType> downSizeFilterSurf;
     downSizeFilterSurf.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
@@ -649,6 +678,8 @@ int main(int argc, char** argv) {
     // LiDAR 初次扫描时间
     bool flg_first_scan = true;
     double first_lidar_time = 0.0;
+    double last_save_time = 0.0;  // 保存 npy 文件的参数
+    int save_id = 0;
     // sync_packages 中使用的变量
     MeasureGroup measures;
     while (status) {
@@ -667,6 +698,7 @@ int main(int argc, char** argv) {
         if (flg_first_scan) {
             first_lidar_time = measures.lidar_beg_time;
             flg_first_scan = false;
+            last_save_time = first_lidar_time;
             continue;
         }
         // 对 IMU 数据进行预处理，包含了前向传播和反向传播
@@ -679,7 +711,7 @@ int main(int argc, char** argv) {
         // 获取 kf 预测的全局状态
         state_point = kf.get_x();
         // 世界系下雷达坐标系的位置，W^p_L = W^p_I + W^R_I * I^t_L
-        vect3 pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+        // vect3 pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         // 动态调整局部地图（室内建图空间小，可以不调整局部地图）
         // lasermap_fov_segment(pos_lid);
 
@@ -719,7 +751,7 @@ int main(int argc, char** argv) {
         
         /* 发布里程计*/
         state_point = kf.get_x();
-        pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
+        vect3 pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
         geoQuat.x = state_point.rot.coeffs()[0];
         geoQuat.y = state_point.rot.coeffs()[1];
         geoQuat.z = state_point.rot.coeffs()[2];
@@ -738,6 +770,16 @@ int main(int argc, char** argv) {
         }
         if (scan_pub_en || pcd_save_en) {
             publish_frame_world(pubLaserCloudFull, p_imu->get_R_W_G());
+        }
+
+        /* 保存 pose 和 point clouds 数据到 npy 文件，每 5s 保存一次*/
+        if (save_npy_en && ((measures.lidar_beg_time-last_save_time)>5)) {
+            last_save_time = measures.lidar_beg_time;
+            neal::logger(neal::LOG_INFO, "(save npy file) current id: " + std::to_string(save_id));
+            neal::logger(neal::LOG_INFO, "(save npy file) current time: " + std::to_string(measures.lidar_beg_time));
+            neal::logger(neal::LOG_INFO, "(save npy file) size before down sample: " + std::to_string(feats_undistort->points.size()));
+            saveNumpy(save_id);
+            save_id++;
         }
 
         status = ros::ok();
